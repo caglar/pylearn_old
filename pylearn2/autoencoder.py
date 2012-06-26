@@ -74,6 +74,7 @@ class Autoencoder(Block, Model):
         assert nhid > 0, "Number of hidden units must be positive"
 
         self.input_space = VectorSpace(nvis)
+        self.output_space = VectorSpace(nhid)
 
         # Save a few parameters needed for resizing
         self.nhid = nhid
@@ -457,7 +458,7 @@ class ContractiveAutoencoder(Autoencoder):
             SquaredError, to penalize it.
         """
         jacobian = self.jacobian_h_x(inputs)
-        return (jacobian ** 2).mean()
+        return (jacobian ** 2).sum(axis=[1,2]).mean()
 
 
 class HigherOrderContractiveAutoencoder(ContractiveAutoencoder):

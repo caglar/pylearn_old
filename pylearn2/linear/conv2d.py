@@ -1,11 +1,10 @@
-from theano_linear.conv2d import Conv2d as OrigConv2D
+from pylearn2.packaged_dependencies.theano_linear.conv2d import Conv2d as OrigConv2D
 import theano.tensor as T
 from pylearn2.utils import sharedX
 import numpy as np
 from theano.tensor.nnet.conv import conv2d
 from pylearn2.linear.linear_transform import LinearTransform as P2LT
 import functools
-
 
 class Conv2D(OrigConv2D):
     """ Extend the TheanoLinear Conv2d class to support everything

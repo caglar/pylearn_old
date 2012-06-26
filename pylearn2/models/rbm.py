@@ -319,10 +319,20 @@ class RBM(Block, Model):
         self.sml_gibbs_steps = sml_gibbs_steps
 
     def get_input_dim(self):
-        return self.nvis
+        if not isinstance(self.vis_space, VectorSpace):
+            raise TypeError("Can't describe "+str(type(self.vis_space))+" as a dimensionality number.")
+        return self.vis_space.dim
+
+    def get_output_dim(self):
+        if not isinstance(self.hid_space, VectorSpace):
+            raise TypeError("Can't describe "+str(type(self.hid_space))+" as a dimensionality number.")
+        return self.hid_space.dim
 
     def get_input_space(self):
         return self.vis_space
+
+    def get_output_space(self):
+        return self.hid_space
 
     def get_params(self):
         return [param for param in self._params]
@@ -430,7 +440,7 @@ class RBM(Block, Model):
 
         optimizer = SGDOptimizer(self, self.base_lr, self.anneal_start)
 
-        sampler = sampler = BlockGibbsSampler(self, 0.5 + np.zeros((self.nchains, self.nvis)), self.rng,
+        sampler = sampler = BlockGibbsSampler(self, 0.5 + np.zeros((self.nchains, self.get_input_dim())), self.rng,
                                                   steps= self.sml_gibbs_steps)
 
 
@@ -1044,7 +1054,7 @@ def build_stacked_RBM(nvis, nhids, batch_size, vis_type='binary',
     if vis_type == 'binary':
         assert input_mean_vis is None
     elif vis_type == 'gaussian':
-        assert input_mean_vis in True, False
+        assert input_mean_vis in (True, False)
 
     # The number of visible units in each layer is the initial input
     # size and the first k-1 hidden unit sizes.

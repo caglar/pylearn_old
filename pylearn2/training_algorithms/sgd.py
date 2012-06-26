@@ -1,12 +1,14 @@
 from __future__ import division
 import datetime
 import numpy as np
+import theano.sparse
 from theano import function, config
 import theano.tensor as T
 from warnings import warn
 from pylearn2.monitor import Monitor
 from pylearn2.utils.iteration import SequentialSubsetIterator
 from pylearn2.training_algorithms.training_algorithm import TrainingAlgorithm
+import pylearn2.costs.cost
 
 
 # TODO: This needs renaming based on specifics. Specifically it needs
@@ -94,8 +96,9 @@ class SGD(TrainingAlgorithm):
 
         self.monitor = Monitor.get_monitor(model)
         self.monitor.set_dataset(dataset=self.monitoring_dataset,
-                                 batches=self.monitoring_batches,
-                                 batch_size=self.batch_size)
+                                 mode="sequential",
+                                 batch_size=self.batch_size,
+                                 num_batches=self.monitoring_batches)
 
 
         #Make the right kind of theano variable for the type of space
@@ -103,7 +106,10 @@ class SGD(TrainingAlgorithm):
         space = self.model.get_input_space()
         X = space.make_theano_batch(name='sgd_X')
 
-        self.topo = len(X.type.broadcastable) > 2
+        if isinstance(X, theano.sparse.basic.SparseVariable):
+            self.topo = False
+        else:
+            self.topo = len(X.type.broadcastable) > 2
 
         try:
             J = sum(c(model, X) for c in self.cost)
@@ -176,9 +182,7 @@ class SGD(TrainingAlgorithm):
             else:
                 X = dataset.get_batch_design(batch_size)
 
-            #print '\n----------------'
             self.sgd_update(X, self.learning_rate)
-            #print '----------------\n'
 
             #comment out this check when not debugging
             """for param in self.params:
@@ -188,8 +192,7 @@ class SGD(TrainingAlgorithm):
                 #
             #"""
 
-            self.monitor.batches_seen += 1
-            self.monitor.examples_seen += batch_size
+            self.monitor.report_batch(batch_size)
 
         for callback in self.update_callbacks:
             try:
@@ -203,7 +206,7 @@ class SGD(TrainingAlgorithm):
             return self.termination_criterion(self.model)
 
 
-class UnsupervisedExhaustiveSGD(TrainingAlgorithm):
+class ExhaustiveSGD(TrainingAlgorithm):
     def __init__(self, learning_rate, cost, batch_size=None,
                  monitoring_batches=None, monitoring_dataset=None,
                  termination_criterion=None, update_callbacks=None):
@@ -224,22 +227,43 @@ class UnsupervisedExhaustiveSGD(TrainingAlgorithm):
         # monitor on one somewhat big batch but update on many small
         # batches.
         self.monitor.set_dataset(dataset=self.monitoring_dataset,
-                                 batches=self.monitoring_batches,
-                                 batch_size=self.batch_size)
+                                 mode='sequential',
+                                 batch_size=self.batch_size,
+                                 num_batches=self.monitoring_batches)
         dataset.set_iteration_scheme('sequential', batch_size=self.batch_size)
         X = T.matrix(name="%s[X]" % self.__class__.__name__)
+        Y = T.matrix(name="%s[Y]" % self.__class__.__name__)
         try:
             iter(self.cost)
             iterable_cost = True
         except TypeError:
             iterable_cost = False
         if iterable_cost:
-            cost_value = sum(c(model, X) for c in self.cost)
+            cost_value = 0
+            self.supervised = False
+            for c in self.cost:
+                if (isinstance(c, pylearn2.costs.cost.SupervisedCost)):
+                    self.supervised = True
+                    cost_value += c(model, X, Y)
+                else:
+                    cost_value += c(model, X)
+            #cost_value = sum(c(model, X) for c in self.cost)
         else:
-            cost_value = self.cost(model, X)
+            if (isinstance(self.cost, pylearn2.costs.cost.SupervisedCost)):
+                self.supervised = True
+                cost_value = self.cost(model, X, Y)
+            else:
+                self.supervised = False
+                cost_value = self.cost(model, X)
         if cost_value.name is None:
-            cost_value.name = 'sgd_cost(' + X.name + ')'
-        self.monitor.add_channel(name=cost_value.name, ipt=X, val=cost_value)
+            if self.supervised:
+                cost_value.name = 'sgd_cost(' + X.name + ', ' + Y.name + ')'
+            else:
+                cost_value.name = 'sgd_cost(' + X.name + ')'
+        if self.supervised:
+            self.monitor.add_channel(name=cost_value.name, ipt=(X,Y), val=cost_value)
+        else:
+            self.monitor.add_channel(name=cost_value.name, ipt=X, val=cost_value)
         params = model.get_params()
         for i, param in enumerate(params):
             if param.name is None:
@@ -261,7 +285,11 @@ class UnsupervisedExhaustiveSGD(TrainingAlgorithm):
             if updates[param] is None:
                 updates[param].name = 'censor(sgd_update(' + param.name + '))'
 
-        self.sgd_update = function([X, learning_rate], updates=updates,
+        if self.supervised:
+            self.sgd_update = function([X, Y, learning_rate], updates=updates,
+                                   name='sgd_update')
+        else:
+            self.sgd_update = function([X, learning_rate], updates=updates,
                                    name='sgd_update')
         self.params = params
 
@@ -288,14 +316,19 @@ class UnsupervisedExhaustiveSGD(TrainingAlgorithm):
             if np.any(np.isnan(value)) or np.any(np.isinf(value)):
                 raise Exception("NaN in " + param.name)
         self.first = False
-        dataset.set_iteration_scheme('sequential', batch_size=self.batch_size)
-        for batch in dataset:
-            grads = self.sgd_update(batch, self.learning_rate)
-            #print grads
-            self.monitor.batches_seen += 1
-            self.monitor.examples_seen += batch_size
-            for callback in self.update_callbacks:
-                callback(self)
+        dataset.set_iteration_scheme('sequential', batch_size=self.batch_size, targets=self.supervised)
+        if self.supervised:
+            for (batch_in, batch_target) in dataset:
+                grads = self.sgd_update(batch_in, batch_target, self.learning_rate)
+                self.monitor.report_batch(batch_size)
+                for callback in self.update_callbacks:
+                    callback(self)
+        else:
+            for batch in dataset:
+                grads = self.sgd_update(batch, self.learning_rate)
+                self.monitor.report_batch(batch_size)
+                for callback in self.update_callbacks:
+                    callback(self)
         if self.termination_criterion is None:
             return True
         else:
@@ -351,7 +384,7 @@ class MonitorBasedLRAdjuster(object):
                              "(currently)")
         v = v[0].val_record
 
-        if len(v) < 2:
+        if len(v) < 1:
 
             if monitor.dataset is None:
                 assert len(v) == 0
@@ -359,13 +392,17 @@ class MonitorBasedLRAdjuster(object):
                         adjustor but the monitor has no entries because you didn't
                         specify a monitoring dataset""")
 
-            raise ValueError("""For some reason there are fewer than 2 monitor entries,
+            raise ValueError("""For some reason there are no monitor entries,
                     yet the MonitorBasedLRAdjuster has been called. This should NEVER happen.
-                    The training algorithm should call the monitor once on initialization, then
-                    after each parameter update should call the monitor followed by the callbacks.
+                    The Train object should call the monitor once on initialization, then
+                    call the callbacks.
                     It seems you are either calling the callback manually rather than as part of
-                    a training algorithm, or you are using an incorrectly implemented training
-                    algorithm.""")
+                    a training algorithm, or there is a problem with the Train object.""")
+        if len(v) == 1:
+            #only the initial monitoring has happened
+            #no learning has happened, so we can't adjust the learning rate yet
+            #just do nothing
+            return
 
         rval = current_learning_rate
 
@@ -390,16 +427,20 @@ class MonitorBasedTermCrit(object):
     monitors, TODO fix this issue) and checks to see if it has
     decreased by a certain proportion in the last N epochs.
     """
-    def __init__(self, prop_decrease, N):
+    def __init__(self, prop_decrease, N, channel_name=None):
+        self._channel_name = channel_name
         self.prop_decrease = prop_decrease
         self.N = N
 
     def __call__(self, model):
         monitor = model.monitor
-        assert len(monitor.channels.values()) == 1, (
-            "Only single channel monitors are supported (currently)"
-        )
-        v = monitor.channels.values()[0].val_record
+        if self._channel_name is None:
+            if len(monitor.channels) != 1:
+                raise ValueError("Only single-channel monitors are supported "
+                                 "for channel_name == None")
+            v = monitor.channels.values()[0].val_record
+        else:
+            v = monitor.channels[self._channel_name].val_record
         if len(v) < self.N:
             return True
         return v[- 1] < (1. - self.prop_decrease) * v[-self.N]

@@ -24,6 +24,7 @@ import numpy as np
 # Local imports
 import pylearn2.config.yaml_parse
 from pylearn2.utils import serial
+from pylearn2.utils import environ
 from pylearn2.monitor import Monitor
 
 
@@ -121,6 +122,7 @@ class Train(object):
         """
         if self.algorithm is None:
             self.model.monitor = Monitor.get_monitor(self.model)
+            self.run_callbacks_and_monitoring()
             while self.model.train(dataset=self.dataset):
                 self.run_callbacks_and_monitoring()
                 if self.save_freq > 0 and self.epochs % self.save_freq == 0:
@@ -131,7 +133,7 @@ class Train(object):
                 self.save()
         else:
             self.algorithm.setup(model=self.model, dataset=self.dataset)
-            self.model.monitor()
+            self.run_callbacks_and_monitoring()
             epoch_start = datetime.datetime.now()
             while self.algorithm.train(dataset=self.dataset):
                 epoch_end = datetime.datetime.now()
@@ -176,7 +178,6 @@ def make_argument_parser():
         formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument('config', action='store',
-                        type=argparse.FileType('r'),
                         choices=None,
                         help='A YAML configuration file specifying the '
                              'training procedure')
@@ -186,19 +187,7 @@ def make_argument_parser():
 if __name__ == "__main__":
     parser = make_argument_parser()
     args = parser.parse_args()
-    config_file_path = args.config.name
-    suffix_to_strip = '.yaml'
-    if config_file_path.endswith(suffix_to_strip):
-        config_file_name = config_file_path[0:-len(suffix_to_strip)]
-    else:
-        config_file_name = config_file_path
-    # publish the PYLEARN2_TRAIN_FILE_NAME environment variable
-    varname = "PYLEARN2_TRAIN_FILE_NAME"
-    # this makes it available to other sections of code in this same script
-    os.environ[varname] = config_file_name
-    # this make it available to any subprocesses we launch
-    os.putenv(varname, config_file_name)
-    train_obj = pylearn2.config.yaml_parse.load(args.config)
+    train_obj = serial.load_train_file(args.config)
     try:
         iter(train_obj)
         iterable = True

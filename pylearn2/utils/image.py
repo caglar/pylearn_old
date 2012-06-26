@@ -23,7 +23,8 @@ def show(image):
         if image.dtype == 'int8':
             image = np.cast['uint8'](image)
         elif str(image.dtype).startswith('float'):
-            image *= 255.
+            #don't use *=, we don't want to modify the input array
+            image = image * 255.
             image = np.cast['uint8'](image)
 
         #PIL is too stupid to handle single-channel arrays
@@ -102,7 +103,8 @@ def ndarray_from_pil(pil, dtype='uint8'):
 
 
 def rescale(image, shape):
-    """ scales image to have shape """
+    """ scales image to be no larger than shape
+        PIL might give you unexpected results beyond that"""
 
     assert len(image.shape) == 3  # rows, cols, channels
     assert len(shape) == 2  # rows, cols
@@ -114,7 +116,7 @@ def rescale(image, shape):
     rval = ndarray_from_pil(i, dtype=image.dtype)
 
     return rval
-
+resize = rescale
 
 def fit_inside(image, shape):
     """ scales image down to fit inside shape
@@ -209,6 +211,8 @@ def load(filepath, rescale=True, dtype='float64'):
 
     return rval
 
+def save(filepath, ndarray):
+    pil_from_ndarray(ndarray).save(filepath)
 
 if __name__ == '__main__':
     black = np.zeros((50, 50, 3), dtype='uint8')

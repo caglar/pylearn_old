@@ -1,4 +1,6 @@
 import warnings
+
+from .general import is_iterable
 try:
     import theano
 except ImportError:
@@ -40,6 +42,12 @@ if theano is not None:
 
         return theano.tensor.cast(variable, theano.config.floatX)
 
+    def constantX(value):
+        """
+            Returns a constant of value `value` with floatX dtype
+        """
+        return theano.tensor.constant(numpy.asarray(value,
+                                         dtype=theano.config.floatX))
     def subdict(d, keys):
         """ Create a subdictionary of d with the keys in keys """
         result = {}
@@ -83,3 +91,4 @@ def safe_update(dict_to, dict_from):
             raise KeyError(key)
         dict_to[key] = val
     return dict_to
+
