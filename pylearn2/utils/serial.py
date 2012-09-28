@@ -11,6 +11,36 @@ io = None
 hdf_reader = None
 import struct
 from pylearn2.utils import environ
+from pylearn2.utils.string_utils import match
+
+def raise_cannot_open(path):
+    pieces = path.split('/')
+    for i in xrange(1,len(pieces)+1):
+        so_far = '/'.join(pieces[0:i])
+        if not os.path.exists(so_far):
+            if i == 1:
+                if so_far == '':
+                    continue
+                raise IOError('Cannot open '+path+' ('+so_far+' does not exist)')
+            parent = '/'.join(pieces[0:i-1])
+            bad = pieces[i-1]
+
+            if not os.path.isdir(parent):
+                raise IOError("Cannot open "+path+" because "+parent+" is not a directory.")
+
+            candidates = os.listdir(parent)
+
+            if len(candidates) == 0:
+                raise IOError("Cannot open "+path+" because "+parent+" is empty.")
+
+            if len(candidates) > 100:
+                # Don't attempt to guess the right name if the directory is huge
+                raise IOError("Cannot open "+path+" but can open "+parent+".")
+
+            raise IOError("Cannot open "+path+" but can open "+parent+". Did you mean "+match(bad,candidates)+" instead of "+bad+"?")
+        # end if
+    # end for
+    assert False
 
 def load(filepath, recurse_depth=0):
 
@@ -65,7 +95,13 @@ def load(filepath, recurse_depth=0):
             with open(filepath, 'rb') as f:
                 obj = cPickle.load(f)
         else:
-            obj = joblib.load(filepath)
+            try:
+                obj = joblib.load(filepath)
+            except Exception, e:
+                if os.path.exists(filepath) and not os.path.isdir(filepath):
+                    raise
+                raise_cannot_open(filepath)
+
 
     except BadPickleGet, e:
         print ('Failed to open ' + str(filepath) +
@@ -158,6 +194,25 @@ def save(filepath, obj):
                 sys.setrecursionlimit(old_limit)
 
 
+def get_pickle_protocol():
+    """
+    Allow configuration of the pickle protocol on a per-machine basis.
+    This way, if you use multiple platforms with different versions of
+    pickle, you can configure each of them to use the highest protocol
+    supported by all of the machines that you want to be able to
+    communicate.
+    """
+    try:
+        protocol_str = os.environ['PYLEARN2_PICKLE_PROTOCOL']
+    except KeyError:
+        # If not defined, we default to 0 because this is the default
+        # protocol used by cPickle.dump (and because it results in
+        # maximum portability)
+        protocol_str = '0'
+    if protocol_str == 'pickle.HIGHEST_PROTOCOL':
+        return pickle.HIGHEST_PROTOCOL
+    return int(protocol_str)
+
 def _save(filepath, obj):
     try:
         import joblib
@@ -187,7 +242,7 @@ def _save(filepath, obj):
                 warnings.warn('Warning: .joblib suffix specified but joblib '
                               'unavailable. Using ordinary pickle.')
             with open(filepath, 'wb') as filehandle:
-                cPickle.dump(obj, filehandle)
+                cPickle.dump(obj, filehandle, get_pickle_protocol())
     except Exception, e:
         # TODO: logging, or warning
         print "cPickle has failed to write an object to " + filepath
@@ -214,7 +269,7 @@ def _save(filepath, obj):
                     'when it dies'
                 )
                 with open(filepath, 'wb') as f:
-                    cPickle.dump(obj, f)
+                    cPickle.dump(obj, f, get_pickle_protocol())
                 print ('Somehow or other, the file write worked once '
                        'we quit using the try/catch.')
             else:
@@ -236,12 +291,15 @@ def _save(filepath, obj):
 
 
 def clone_via_serialize(obj):
-    str = cPickle.dumps(obj)
-    return cPickle.loads(str)
+    s = cPickle.dumps(obj, get_pickle_protocol())
+    return cPickle.loads(s)
 
 
 def to_string(obj):
-    return cPickle.dumps(obj)
+    return cPickle.dumps(obj, get_pickle_protocol())
+
+def from_string(s):
+    return cPickle.loads(s)
 
 
 def mkdir(filepath):

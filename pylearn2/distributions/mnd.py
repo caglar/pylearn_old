@@ -1,9 +1,15 @@
 """A Multivariate Normal Distribution."""
-from scipy.linalg import cholesky, det, solve
-import numpy as N
+import warnings
+try:
+    from scipy.linalg import cholesky, det, solve
+except ImportError:
+    warnings.warn("Could not import some scipy.linalg functions")
 import theano.tensor as T
 from theano import config
 from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
+from pylearn2.utils import sharedX
+import numpy as np
+N = np
 
 
 class MND(object):
@@ -24,7 +30,7 @@ class MND(object):
         self.sigma_inv = solve(self.sigma, N.identity(mu.shape[0]),
                                sym_pos=True)
         self.L = cholesky(self.sigma)
-        self.s_rng = RandomStreams(42)
+        self.s_rng = RandomStreams(seed)
 
         #Compute logZ
         #log Z = log 1/( (2pi)^(-k/2) |sigma|^-1/2 )
@@ -61,3 +67,36 @@ def fit(dataset, n_samples=None):
     else:
         X = dataset.get_design_matrix()
     return MND(sigma=N.cov(X.T), mu=X.mean(axis=0))
+
+
+class AdditiveDiagonalMND:
+
+    def __init__(self, init_beta, nvis):
+        """ A conditional distribution that adds
+        gaussian noise with diagonal precision
+        matrix beta to another variable that it
+        conditions on
+        """
+
+        self.__dict__.update(locals())
+        del self.self
+
+        self.beta = sharedX(np.ones((nvis,))*init_beta)
+        assert self.beta.ndim == 1
+
+        self.s_rng = RandomStreams(17)
+
+    def random_design_matrix(self, X):
+        """ X: a theano variable containing a design matrix
+        of observations of the random vector to condition on."""
+        Z = self.s_rng.normal(size=X.shape,
+                              avg=X, std=1./T.sqrt(self.beta), dtype=config.floatX)
+        return Z
+
+    def is_symmetric(self):
+        """ A property of conditional distributions
+        P(Y|X)
+        Return true if P(y|x) = P(x|y) for all x,y
+        """
+
+        return True

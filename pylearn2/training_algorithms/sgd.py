@@ -1,238 +1,117 @@
 from __future__ import division
-import datetime
+import time
 import numpy as np
 import theano.sparse
-from theano import function, config
+from theano import function
 import theano.tensor as T
-from warnings import warn
 from pylearn2.monitor import Monitor
-from pylearn2.utils.iteration import SequentialSubsetIterator
 from pylearn2.training_algorithms.training_algorithm import TrainingAlgorithm
 import pylearn2.costs.cost
+from pylearn2.utils import sharedX
+from theano.printing import Print
+from pylearn2.training_callbacks.training_callback import TrainingCallback
+import warnings
+from theano import config
 
-
-# TODO: This needs renaming based on specifics. Specifically it needs
-# "unsupervised" in its name, and some sort of qualification based on
-# its slightly unorthodox batch selection strategy.
 class SGD(TrainingAlgorithm):
-    """Stochastic Gradient Descent with an optional validation set
-    for error monitoring.
-
-    TODO: right now, assumes there is just one variable, X, i.e.
-    is designed for unsupervised learning need to support other tasks.
-
-    TODO: document parameters, especially monitoring_batches
     """
+    Stochastic Gradient Descent
 
-    def __init__(self, learning_rate, cost, batch_size=None,
-                 batches_per_iter=1000, monitoring_batches=-1,
-                 monitoring_dataset=None, termination_criterion=None,
-                 update_callbacks=None):
-        """
-        Instantiates an SGD object.
+    WRITEME: what is a good reference to read about this algorithm?
 
-        Parameters
-        ----------
-        learning_rate : float
-            The stochastic gradient step size, relative to your cost
-            function.
-        cost : object
-            An object implementing the pylearn2 cost interface.
-        batch_size : int, optional
-            Batch size per update. TODO: What if this is not provided?
-        batches_per_iter : int, optional
-            How many batch updates per epoch. Default is 1000.
-            TODO: Is there any way to specify "as many as the dataset
-            provides"?
-        monitoring_batches : int, optional
-            WRITEME
-        monitoring_dataset : object, optional
-            WRITEME
-        termination_criterion : object, optional
-            WRITEME
-        update_callback : iterable or object, optional
-            WRITEME
+    A TrainingAlgorithm that does gradient descent on minibatches.
 
-        Notes
-        -----
-        TODO: for now, learning_rate is just a float, but later it
-        should support passing in a class that dynamically adjusts the
-        learning rate if batch_size is None, reverts to the
-        force_batch_size field of the model if monitoring_dataset is
-        provided, uses monitoring_batches batches of data from
-        monitoring_dataset to report monitoring errors
-        """
-        #Store parameters
-        self.learning_rate = float(learning_rate)
-        self.batch_size = batch_size
-        self.batches_per_iter = batches_per_iter
-        self.cost = cost
-        if monitoring_dataset is None:
-            assert monitoring_batches == -1, ("no monitoring dataset, but "
-                                              "monitoring_batches > 0")
-        self.monitoring_dataset = monitoring_dataset
-        self.monitoring_batches = monitoring_batches
-        self.termination_criterion = termination_criterion
-        self._register_update_callbacks(update_callbacks)
-        self.bSetup = False
-        self.first = True
-
-    def setup(self, model, dataset):
-        """
-        Initialize the training algorithm. Should be called
-        once before calls to train.
-
-        Parameters
-        ----------
-        model : object
-            Model to be trained.  Object implementing the pylearn2 Model
-            interface.
-        dataset : object
-            Dataset on which to train.  Object implementing the
-            pylearn2 Dataset interface.
-        """
-
-        self.model = model
-
-        self.monitor = Monitor.get_monitor(model)
-        self.monitor.set_dataset(dataset=self.monitoring_dataset,
-                                 mode="sequential",
-                                 batch_size=self.batch_size,
-                                 num_batches=self.monitoring_batches)
-
-
-        #Make the right kind of theano variable for the type of space
-        #the model acts on
-        space = self.model.get_input_space()
-        X = space.make_theano_batch(name='sgd_X')
-
-        if isinstance(X, theano.sparse.basic.SparseVariable):
-            self.topo = False
-        else:
-            self.topo = len(X.type.broadcastable) > 2
-
-        try:
-            J = sum(c(model, X) for c in self.cost)
-        except TypeError:
-            J = self.cost(model, X)
-
-        if J.name is None:
-            J.name = 'sgd_cost(' + X.name + ')'
-        self.monitor.add_channel(name=J.name, ipt=X, val=J)
-        params = model.get_params()
-
-        for i, param in enumerate(params):
-            if param.name is None:
-                param.name = 'sgd_params[%d]' % i
-
-        grads = dict(zip(params, T.grad(J, params)))
-
-        for param in grads:
-            if grads[param].name is None:
-                grads[param].name = ('grad(%(costname)s, %(paramname)s)' %
-                                     {'costname': J.name,
-                                      'paramname': param.name})
-
-        learning_rate = T.scalar('sgd_learning_rate')
-
-        updates = dict(zip(params, [param - learning_rate * grads[param]
-                                    for param in params]))
-
-        for param in updates:
-            if updates[param].name is None:
-                updates[param].name = 'sgd_update(' + param.name + ')'
-
-        model.censor_updates(updates)
-        for param in updates:
-            if updates[param] is None:
-                updates[param].name = 'censor(sgd_update(' + param.name + '))'
-
-        self.sgd_update = function([X, learning_rate], updates=updates,
-                                   name='sgd_update')
-        self.params = params
-        self.bSetup = True
-
-        #TODO: currently just supports doing a gradient step on J(X)
-        #      needs to support "side effects", e.g. updating persistent chains
-        #      for SML (if we decide to implement SML as SGD)
-
-    def train(self, dataset):
-        model = self.model
-        if not self.bSetup:
-            raise Exception("SGD.train called without first calling SGD.setup")
-        if self.batch_size is None:
-            batch_size = model.force_batch_size
-        else:
-            batch_size = self.batch_size
-            if hasattr(model, "force_batch_size"):
-                assert (model.force_batch_size <= 0 or
-                        batch_size == model.force_batch_size), (
-                            # TODO: more informative assertion error
-                            "invalid force_batch_size attribute"
-                        )
-        for param in self.params:
-            value = param.get_value(borrow=True)
-            if np.any(np.isnan(value)) or np.any(np.isinf(value)):
-                raise Exception("NaN in " + param.name)
-
-        self.first = False
-        for i in xrange(self.batches_per_iter):
-            if self.topo:
-                X = dataset.get_batch_topo(batch_size)
-            else:
-                X = dataset.get_batch_design(batch_size)
-
-            self.sgd_update(X, self.learning_rate)
-
-            #comment out this check when not debugging
-            """for param in self.params:
-                value = param.get_value(borrow=True)
-                if N.any(N.isnan(value)):
-                    raise Exception("NaN in "+param.name)
-                #
-            #"""
-
-            self.monitor.report_batch(batch_size)
-
-        for callback in self.update_callbacks:
-            try:
-                callback(self)
-            except Exception as e:
-                print ("WARNING: callback " + str(callback) + " failed with "
-                       + str(type(e)) + ", mesage: " + str(e))
-        if self.termination_criterion is None:
-            return True
-        else:
-            return self.termination_criterion(self.model)
-
-
-class ExhaustiveSGD(TrainingAlgorithm):
+    """
     def __init__(self, learning_rate, cost, batch_size=None,
                  monitoring_batches=None, monitoring_dataset=None,
-                 termination_criterion=None, update_callbacks=None):
-        self.learning_rate = float(learning_rate)
+                 termination_criterion=None, update_callbacks=None,
+                 init_momentum = None, set_batch_size = False):
+        """
+            WRITEME
+
+            learning_rate: The learning rate to use.
+                            Train object callbacks can change the learning
+                            rate after each epoch. SGD update_callbacks
+                            can change it after each minibatch.
+            cost: a pylearn2.costs.cost.Cost object specifying the objective
+                  function to be minimized.
+            init_momentum: if None, does not use momentum
+                            otherwise, use momentum and initialize the
+                            momentum coefficient to init_momentum.
+                            Callbacks can change this over time just like
+                            the learning rate.
+
+                            If the gradient is the same on every step, then
+                            the update taken by the SGD algorithm is scaled
+                            by a factor of 1/(1-momentum).
+
+                            See section 9 of Geoffrey Hinton's "A Practical
+                            Guide to Training Restricted Boltzmann Machines"
+                            for details.
+            set_batch_size: if True, and batch_size conflicts with
+                            model.force_batch_size, will call
+                            model.set_batch_size(batch_size) in an attempt
+                            to change model.force_batch_size
+
+            Parameters are updated by the formula:
+
+            inc := momentum * inc - learning_rate * d cost / d param
+            param := param + inc
+        """
+
+        self.learning_rate = sharedX(learning_rate, 'learning_rate')
         self.cost = cost
         self.batch_size = batch_size
+        self.set_batch_size = set_batch_size
         self.monitoring_dataset = monitoring_dataset
         self.monitoring_batches = monitoring_batches
         self.termination_criterion = termination_criterion
+        self.init_momenutm = init_momentum
+        if init_momentum is None:
+            self.momentum = None
+        else:
+            self.momentum = sharedX(init_momentum, 'momentum')
         self._register_update_callbacks(update_callbacks)
         self.first = True
 
     def setup(self, model, dataset):
         self.model = model
+
+        batch_size = self.batch_size
+        if hasattr(model, "force_batch_size"):
+            if model.force_batch_size > 0:
+                if batch_size is not None:
+                    if batch_size != model.force_batch_size:
+                        if self.set_batch_size:
+                            model.set_batch_size(batch_size)
+                        else:
+                            raise ValueError("batch_size argument to SGD conflicts with model's force_batch_size attribute")
+                else:
+                    self.batch_size = model.force_batch_size
         self.monitor = Monitor.get_monitor(model)
+        # TODO: come up with some standard scheme for associating training runs
+        # with monitors / pushing the monitor automatically, instead of just
+        # enforcing that people have called push_monitor
+        assert self.monitor.get_examples_seen() == 0
         # TODO: monitoring batch size ought to be configurable
         # separately from training batch size, e.g. if you would rather
         # monitor on one somewhat big batch but update on many small
         # batches.
-        self.monitor.set_dataset(dataset=self.monitoring_dataset,
+        self.monitor.add_dataset(dataset=self.monitoring_dataset,
                                  mode='sequential',
                                  batch_size=self.batch_size,
                                  num_batches=self.monitoring_batches)
-        dataset.set_iteration_scheme('sequential', batch_size=self.batch_size)
-        X = T.matrix(name="%s[X]" % self.__class__.__name__)
+        self.monitor._sanity_check()
+
+
+
+
+        X = model.get_input_space().make_theano_batch(name="%s[X]" % self.__class__.__name__)
+        self.topo = not X.ndim == 2
         Y = T.matrix(name="%s[Y]" % self.__class__.__name__)
+
+        dataset.set_iteration_scheme('shuffled_sequential', batch_size=self.batch_size, topo = self.topo)
+
         try:
             iter(self.cost)
             iterable_cost = True
@@ -249,7 +128,7 @@ class ExhaustiveSGD(TrainingAlgorithm):
                     cost_value += c(model, X)
             #cost_value = sum(c(model, X) for c in self.cost)
         else:
-            if (isinstance(self.cost, pylearn2.costs.cost.SupervisedCost)):
+            if self.cost.supervised:
                 self.supervised = True
                 cost_value = self.cost(model, X, Y)
             else:
@@ -260,36 +139,78 @@ class ExhaustiveSGD(TrainingAlgorithm):
                 cost_value.name = 'sgd_cost(' + X.name + ', ' + Y.name + ')'
             else:
                 cost_value.name = 'sgd_cost(' + X.name + ')'
+
+        # Set up monitor to model the objective value, learning rate,
+        # momentum (if applicable), and extra channels defined by
+        # the cost
+        # TODO: also monitor things defined by the model
+        learning_rate = self.learning_rate
         if self.supervised:
-            self.monitor.add_channel(name=cost_value.name, ipt=(X,Y), val=cost_value)
+            cost_channels = self.cost.get_monitoring_channels(model, X, Y)
+            ipt = (X, Y)
         else:
-            self.monitor.add_channel(name=cost_value.name, ipt=X, val=cost_value)
-        params = model.get_params()
+            cost_channels = self.cost.get_monitoring_channels(model, X)
+            ipt = X
+        # This name must not vary, since callbacks that respond to the
+        # values in the monitor use the name to find it
+        self.monitor.add_channel(name='sgd_cost', ipt=ipt,
+                val=cost_value, dataset=self.monitoring_dataset)
+        self.monitor.add_channel(name='learning_rate', ipt=ipt,
+                val=learning_rate)
+        for key in cost_channels:
+            self.monitor.add_channel(name=key, ipt=ipt,
+                    val=cost_channels[key], dataset=self.monitoring_dataset)
+        if self.momentum:
+            self.monitor.add_channel(name='momentum', ipt=ipt,
+                    val=self.momentum, dataset=self.monitoring_dataset)
+
+        params = list(model.get_params())
+        assert len(params) > 0
         for i, param in enumerate(params):
             if param.name is None:
                 param.name = 'sgd_params[%d]' % i
-        grads = dict(zip(params, T.grad(cost_value, params)))
+        grads = dict(zip(params, T.grad(cost_value, params, disconnected_inputs = 'warn')))
         for param in grads:
             if grads[param].name is None:
                 grads[param].name = ('grad(%(costname)s, %(paramname)s)' %
                                      {'costname': cost_value.name,
                                       'paramname': param.name})
-        learning_rate = T.scalar('sgd_learning_rate')
-        updates = dict(zip(params, [param - learning_rate * grads[param]
+
+        lr_scalers = model.get_lr_scalers()
+
+        for key in lr_scalers:
+            if key not in params:
+                raise ValueError("Tried to scale the learning rate on " +\
+                        str(key)+" which is not an optimization parameter.")
+
+        if self.momentum is None:
+            updates = dict(zip(params, [param - learning_rate * \
+                lr_scalers.get(param, 1.) * grads[param]
                                     for param in params]))
+        else:
+            updates = {}
+            for param in params:
+                inc = sharedX(param.get_value() * 0.)
+                if param.name is not None:
+                    inc.name = 'inc_'+param.name
+                updated_inc = self.momentum * inc - learning_rate * grads[param]
+                updates[inc] = updated_inc
+                updates[param] = param + updated_inc
+
+
         for param in updates:
             if updates[param].name is None:
                 updates[param].name = 'sgd_update(' + param.name + ')'
         model.censor_updates(updates)
         for param in updates:
-            if updates[param] is None:
+            if updates[param].name is None:
                 updates[param].name = 'censor(sgd_update(' + param.name + '))'
 
         if self.supervised:
-            self.sgd_update = function([X, Y, learning_rate], updates=updates,
+            self.sgd_update = function([X, Y], updates=updates,
                                    name='sgd_update')
         else:
-            self.sgd_update = function([X, learning_rate], updates=updates,
+            self.sgd_update = function([X], updates=updates,
                                    name='sgd_update')
         self.params = params
 
@@ -297,36 +218,27 @@ class ExhaustiveSGD(TrainingAlgorithm):
         if not hasattr(self, 'sgd_update'):
             raise Exception("train called without first calling setup")
         model = self.model
-        if self.batch_size is None:
-            try:
-                batch_size = model.force_batch_size
-            except AttributeError:
-                raise ValueError("batch_size unspecified in both training "
-                                 "procedure and model")
-        else:
-            batch_size = self.batch_size
-            if hasattr(model, "force_batch_size"):
-                assert (model.force_batch_size <= 0 or
-                        batch_size == model.force_batch_size), (
-                            # TODO: more informative assertion error
-                            "invalid force_batch_size attribute"
-                        )
+        batch_size = self.batch_size
         for param in self.params:
             value = param.get_value(borrow=True)
             if np.any(np.isnan(value)) or np.any(np.isinf(value)):
                 raise Exception("NaN in " + param.name)
         self.first = False
-        dataset.set_iteration_scheme('sequential', batch_size=self.batch_size, targets=self.supervised)
+        dataset.set_iteration_scheme('shuffled_sequential', batch_size=self.batch_size, targets=self.supervised, topo=self.topo)
         if self.supervised:
             for (batch_in, batch_target) in dataset:
-                grads = self.sgd_update(batch_in, batch_target, self.learning_rate)
-                self.monitor.report_batch(batch_size)
+                self.sgd_update(batch_in, batch_target)
+                actual_batch_size = batch_in.shape[0]
+                self.monitor.report_batch(actual_batch_size)
+                #print 'batches seen', self.monitor.get_batches_seen()
                 for callback in self.update_callbacks:
                     callback(self)
         else:
             for batch in dataset:
-                grads = self.sgd_update(batch, self.learning_rate)
-                self.monitor.report_batch(batch_size)
+                self.sgd_update(batch)
+                actual_batch_size = batch.shape[0] # iterator might return a smaller batch if dataset size
+                                                   # isn't divisible by batch_size
+                self.monitor.report_batch(actual_batch_size)
                 for callback in self.update_callbacks:
                     callback(self)
         if self.termination_criterion is None:
@@ -334,8 +246,16 @@ class ExhaustiveSGD(TrainingAlgorithm):
         else:
             return self.termination_criterion(self.model)
 
+class ExhaustiveSGD(SGD): # deprecated!
 
-class MonitorBasedLRAdjuster(object):
+    def __init__(self, * args, ** kwargs):
+
+        warnings.warn("ExhaustiveSGD is deprecated. It has been renamed to SGD.")
+
+        super(ExhaustiveSGD,self).__init__(*args, ** kwargs)
+
+
+class MonitorBasedLRAdjuster(TrainingCallback):
     """
 
     DO NOT USE AS A CALLBACK FOR THE SGD ALGORITHM.
@@ -375,14 +295,12 @@ class MonitorBasedLRAdjuster(object):
     def __call__(self, model, dataset, algorithm):
         # TODO: more sophisticated error checking here.
         model = algorithm.model
-        current_learning_rate = algorithm.learning_rate
+        lr = algorithm.learning_rate
+        current_learning_rate = lr.get_value()
         assert hasattr(model, 'monitor'), ("no monitor associated with " +
                                            str(model))
         monitor = model.monitor
-        v = monitor.channels.values()
-        assert len(v) == 1, ("Only single channel monitors are supported "
-                             "(currently)")
-        v = v[0].val_record
+        v = monitor.channels['sgd_cost'].val_record
 
         if len(v) < 1:
 
@@ -418,22 +336,69 @@ class MonitorBasedLRAdjuster(object):
         rval = max(self.min_lr, rval)
         rval = min(self.max_lr, rval)
 
-        algorithm.learning_rate = rval
+        lr.set_value(np.cast[lr.dtype](rval))
 
 
-class MonitorBasedTermCrit(object):
-    """A termination criterion that pulls out the only channel in
-    the model's monitor (this won't work for multiple-channel
-    monitors, TODO fix this issue) and checks to see if it has
-    decreased by a certain proportion in the last N epochs.
+class PatienceBasedTermCrit(object):
     """
-    def __init__(self, prop_decrease, N, channel_name=None):
+    A monitor-based termination criterion using a geometrically increasing
+    ammount of patience. If the selected channel has decreased by a certain
+    proportion when comparing to the lowest value seen yet, the patience is
+    set to a factor of the number of examples seen, which by default
+    (patience_increase=2.) ensures the model has seen as many examples as the
+    number of examples that lead to the lowest value before concluding a local
+    optima has been reached.
+
+    Note: Technically, the patience corresponds to a number of epochs to be
+    independent of the size of the dataset, so be aware of that when choosing
+    initial_patience.
+    """
+    def __init__(self, prop_decrease, initial_patience,
+                 patience_increase=2., channel_name=None):
+        """
+        Initialize a patience-based termination criterion.
+
+        Parameters
+        ----------
+        prop_decrease : float
+            The factor X in the (1 - X) * best_value threshold
+        initial_patience : int
+            Minimal number of epochs the model has to run before it can stop
+        patience_increase : float, optional
+            The factor X in the patience = X * n_iter update.
+        channel_name : string, optional
+            Name of the channel to examine. If None and the monitor
+            has only one channel, this channel will be used; otherwise, an
+            error will be raised.
+        """
         self._channel_name = channel_name
         self.prop_decrease = prop_decrease
-        self.N = N
+        self.patience = initial_patience
+        self.best_value = np.inf
+        self.patience_increase = patience_increase
 
     def __call__(self, model):
+        """
+        Returns True or False depending on whether the optimization should
+        stop or not. The optimization should stop if it has run for a number
+        of epochs superior to the patience without any improvement.
+
+        Parameters
+        ----------
+        model : Model
+            The model used in the experiment and from which the monitor used
+            in the termination criterion will be extracted.
+
+        Returns
+        -------
+        boolean
+            True or False, indicating if the optimization should stop or not.
+        """
         monitor = model.monitor
+        # In the case the monitor has only one channel, the channel_name can
+        # be omitted and the criterion will examine the only channel
+        # available. However, if the monitor has multiple channels, leaving
+        # the channel_name unspecified will raise an error.
         if self._channel_name is None:
             if len(monitor.channels) != 1:
                 raise ValueError("Only single-channel monitors are supported "
@@ -441,9 +406,87 @@ class MonitorBasedTermCrit(object):
             v = monitor.channels.values()[0].val_record
         else:
             v = monitor.channels[self._channel_name].val_record
-        if len(v) < self.N:
-            return True
-        return v[- 1] < (1. - self.prop_decrease) * v[-self.N]
+        # If the channel value decrease is higher than the threshold, we
+        # update the best value to this value and we update the patience.
+        if v[-1] < self.best_value * (1. - self.prop_decrease):
+            # Using the max between actual patience and updated patience
+            # ensures that the model will run for at least the initial
+            # patience and that it would behave correctly if the user
+            # chooses a dumb value (i.e. less than 1)
+            self.patience = max(self.patience, len(v) * self.patience_increase)
+            self.best_value = v[-1]
+
+        return len(v) < self.patience
+
+
+class MonitorBasedTermCrit(object):
+    """
+    A termination criterion that pulls out the specified channel in
+    the model's monitor and checks to see if it has decreased by a
+    certain proportion of the lowest value in the last N epochs.
+    """
+    def __init__(self, prop_decrease, N, channel_name=None):
+        """
+        Initialize a monitor-based termination criterion.
+
+        Parameters
+        ----------
+        prop_decrease : float
+            The threshold factor by which we expect the channel value to have
+            decreased
+        N : int
+            Number of epochs to look back
+        channel_name : string, optional
+            Name of the channel to examine. If None and the monitor
+            has only one channel, this channel will be used; otherwise, an
+            error will be raised.
+        """
+        self._channel_name = channel_name
+        self.prop_decrease = prop_decrease
+        self.N = N
+        self.countdown = N
+        self.best_value = np.inf
+
+    def __call__(self, model):
+        """
+        Returns True or False depending on whether the optimization should
+        stop or not. The optimization should stop if the model has run for
+        N epochs without any improvement.
+
+        Parameters
+        ----------
+        model : Model
+            The model used in the experiment and from which the monitor used
+            in the termination criterion will be extracted.
+
+        Returns
+        -------
+        boolean
+            True or False, indicating if the optimization should stop or not.
+        """
+        monitor = model.monitor
+        # In the case the monitor has only one channel, the channel_name can
+        # be omitted and the criterion will examine the only channel
+        # available. However, if the monitor has multiple channels, leaving
+        # the channel_name unspecified will raise an error.
+        if self._channel_name is None:
+            v = monitor.channels['sgd_cost'].val_record
+        else:
+            v = monitor.channels[self._channel_name].val_record
+
+        # The countdown decreases every time the termination criterion is
+        # called unless the channel value is lower than the best value times
+        # the prop_decrease factor, in which case the countdown is reset to N
+        # and the best value is updated
+        if v[- 1] < (1. - self.prop_decrease) * self.best_value:
+            self.countdown = self.N
+            self.best_value = v[-1]
+        else:
+            self.countdown = self.countdown - 1
+        # The optimization continues until the countdown has reached 0,
+        # meaning that N epochs have passed without the model improving
+        # enough.
+        return self.countdown > 0
 
 
 class EpochCounter(object):
@@ -469,6 +512,9 @@ class EpochCounter(object):
 
 
 class AnnealedLearningRate(object):
+    """ WRITEME
+    Evidently a callback for the SGD algorithm rather than the Train object?
+    """
     def __init__(self, anneal_start):
         self._initialized = False
         self._count = 0
@@ -476,13 +522,41 @@ class AnnealedLearningRate(object):
 
     def __call__(self, algorithm):
         if not self._initialized:
-            self._base = algorithm.learning_rate
+            self._base = algorithm.learning_rate.get_value()
         self._count += 1
-        algorithm.learning_rate = self.current_learning_rate()
+        algorithm.learning_rate.set_value(self.current_learning_rate())
 
     def current_learning_rate(self):
         return self._base * min(1, self._anneal_start / self._count)
 
+class MomentumAdjustor(TrainingCallback):
+    def __init__(self, final_momentum, start, saturate):
+        """
+            final_momentum: the momentum coefficient to use at the end
+                            of learning.
+            start: the epoch on which to start growing the momentum coefficient.
+            saturate: the epoch on which the moment should reach its final value
+        """
+        self.__dict__.update(locals())
+        del self.self
+        self._initialized = False
+        self._count = 0
+
+    def __call__(self, model, dataset, algorithm):
+        if not self._initialized:
+            self._init_momentum = algorithm.momentum.get_value()
+            self._initialized = True
+        self._count += 1
+        algorithm.momentum.set_value( np.cast[config.floatX](self.current_momentum()))
+
+    def current_momentum(self):
+        w = self.saturate - self.start
+        alpha = float(self._count - self.start) / float(w)
+        if alpha < 0.:
+            alpha = 0.
+        if alpha > 1.:
+            alpha = 1.
+        return self._init_momentum * (1.-alpha)+alpha*self.final_momentum
 
 # This might be worth rolling into the SGD logic directly at some point.
 class ConjunctionCriterion(object):

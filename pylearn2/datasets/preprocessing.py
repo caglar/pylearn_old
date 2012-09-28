@@ -1,7 +1,10 @@
 import warnings
 import copy
 import numpy as np
-from scipy import linalg
+try:
+    from scipy import linalg
+except ImportError:
+    warnings.warn("Could not import scipy.linalg")
 from theano import function
 import theano.tensor as T
 
@@ -683,3 +686,11 @@ class ZCA(object):
             self.fit(X)
         new_X = np.dot(X - self.mean_, self.P_)
         dataset.set_design_matrix(new_X)
+
+    def invert(self):
+        self.inv_P_ = np.linalg.inv(self.P_)
+
+    def inverse(self, X):
+        assert X.ndim == 2
+        return np.dot(X, self.inv_P_) + self.mean_
+

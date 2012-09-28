@@ -20,6 +20,7 @@ from pylearn2.utils import as_floatX, safe_update, sharedX
 from pylearn2.models import Model
 from pylearn2.optimizer import SGDOptimizer
 from pylearn2.expr.basic import theano_norms
+from pylearn2.expr.nnet import inverse_sigmoid_numpy
 from pylearn2.linear.matrixmul import MatrixMul
 from pylearn2.space import VectorSpace
 theano.config.warn.sum_div_dimshuffle_bug = False
@@ -52,13 +53,16 @@ def training_updates(visible_batch, model, sampler, optimizer):
         An instance of `Optimizer` or a derived class, or one implementing
         the optimizer interface (typically an `SGDOptimizer`).
     """
+    # Compute negative phase updates.
+    sampler_updates = sampler.updates()
+    # Compute SML gradients.
     pos_v = visible_batch
+    #neg_v = sampler_updates[sampler.particles]
     neg_v = sampler.particles
     grads = model.ml_gradients(pos_v, neg_v)
+    # Build updates dictionary combining (gradient, sampler) updates.
     ups = optimizer.updates(gradients=grads)
-
-    # Add the sampler's updates (negative phase particles, etc.).
-    safe_update(ups, sampler.updates())
+    safe_update(ups, sampler_updates)
     return ups
 
 
@@ -197,7 +201,8 @@ class RBM(Block, Model):
             vis_space = None,
             hid_space = None,
             transformer = None,
-            irange=0.5, rng=None, init_bias_vis = 0.0, init_bias_hid=0.0,
+            irange=0.5, rng=None, init_bias_vis = None,
+            init_bias_vis_marginals = None, init_bias_hid=0.0,
             base_lr = 1e-3, anneal_start = None, nchains = 100, sml_gibbs_steps = 1,
             random_patches_src = None,
             monitor_reconstruction = False):
@@ -221,6 +226,8 @@ class RBM(Block, Model):
             A pylearn2.space.Space object describing what kind of vector
             space the RBM's hidden units live in. Don't specify if you used
             nvis / nhid
+        init_bias_vis_marginals: either None, or a Dataset to use to initialize
+            the visible biases to the inverse sigmoid of the data marginals
         irange : float, optional
             The size of the initial interval around 0 for weights.
         rng : RandomState object or seed
@@ -247,6 +254,20 @@ class RBM(Block, Model):
         Model.__init__(self)
         Block.__init__(self)
 
+        if init_bias_vis_marginals is not None:
+            assert init_bias_vis is None
+            X = init_bias_vis_marginals.X
+            assert X.min() >= 0.0
+            assert X.max() <= 1.0
+
+            marginals = X.mean(axis=0)
+
+            #rescale the marginals a bit to avoid NaNs
+            init_bias_vis = inverse_sigmoid_numpy(.01 + .98 * marginals)
+
+
+        if init_bias_vis is None:
+            init_bias_vis = 0.0
 
         if rng is None:
             # TODO: global rng configuration stuff.
@@ -257,27 +278,30 @@ class RBM(Block, Model):
             #if we don't specify things in terms of spaces and a transformer,
             #assume dense matrix multiplication and work off of nvis, nhid
             assert hid_space is None
-            assert transformer is None
+            assert transformer is None or isinstance(transformer,MatrixMul)
             assert nvis is not None
             assert nhid is not None
 
-            if random_patches_src is None:
-                W = rng.uniform(-irange, irange, (nvis, nhid))
-            else:
-                if hasattr(random_patches_src, '__array__'):
-                    W = irange * random_patches_src.T
-                    assert W.shape == (nvis, nhid)
+            if transformer is None:
+                if random_patches_src is None:
+                    W = rng.uniform(-irange, irange, (nvis, nhid))
                 else:
-                    #assert type(irange) == type(0.01)
-                    #assert irange == 0.01
-                    W = irange * random_patches_src.get_batch_design(nhid).T
+                    if hasattr(random_patches_src, '__array__'):
+                        W = irange * random_patches_src.T
+                        assert W.shape == (nvis, nhid)
+                    else:
+                        #assert type(irange) == type(0.01)
+                        #assert irange == 0.01
+                        W = irange * random_patches_src.get_batch_design(nhid).T
 
-            self.transformer = MatrixMul(  sharedX(
-                    W,
-                    name='W',
-                    borrow=True
+                self.transformer = MatrixMul(  sharedX(
+                        W,
+                        name='W',
+                        borrow=True
+                    )
                 )
-            )
+            else:
+                self.transformer = transformer
 
             self.vis_space = VectorSpace(nvis)
             self.hid_space = VectorSpace(nhid)
@@ -350,11 +374,13 @@ class RBM(Block, Model):
         return ['v', 'h']
 
 
-    def get_monitoring_channels(self, V):
+    def get_monitoring_channels(self, V, Y = None):
 
         theano_rng = RandomStreams(42)
 
-        norms = theano_norms(self.weights)
+        #TODO: re-enable this in the case where self.transformer
+        #is a matrix multiply
+        #norms = theano_norms(self.weights)
 
         H = self.mean_h_given_v(V)
 
@@ -369,11 +395,11 @@ class RBM(Block, Model):
                  'h_min' : T.min(h),
                  'h_mean': T.mean(h),
                  'h_max' : T.max(h),
-                 'W_min' : T.min(self.weights),
-                 'W_max' : T.max(self.weights),
-                 'W_norms_min' : T.min(norms),
-                 'W_norms_max' : T.max(norms),
-                 'W_norms_mean' : T.mean(norms),
+                 #'W_min' : T.min(self.weights),
+                 #'W_max' : T.max(self.weights),
+                 #'W_norms_min' : T.min(norms),
+                 #'W_norms_max' : T.max(norms),
+                 #'W_norms_mean' : T.mean(norms),
                 'reconstruction_error' : self.reconstruction_error(V, theano_rng) }
 
     def ml_gradients(self, pos_v, neg_v):
@@ -417,9 +443,10 @@ class RBM(Block, Model):
         return grads
 
 
-    def learn(self, dataset, batch_size):
+    def train_batch(self, dataset, batch_size):
         """ A default learning rule based on SML """
         self.learn_mini_batch(dataset.get_batch_design(batch_size))
+        return True
 
     def learn_mini_batch(self, X):
         """ A default learning rule based on SML """
@@ -564,13 +591,13 @@ class RBM(Block, Model):
             visible unit for each row of h.
         """
         if isinstance(h, tensor.Variable):
-            return self.bias_vis + tensor.dot(h, self.weights.T)
+            return self.bias_vis + self.transformer.lmul_T(h)
         else:
             return [self.input_to_v_from_h(hid) for hid in h]
 
     def mean_h_given_v(self, v):
         """
-        Compute the mean activation of the visibles given hidden unit
+        Compute the mean activation of the hidden units given visible unit
         configurations for a set of training examples.
 
         Parameters
@@ -613,7 +640,7 @@ class RBM(Block, Model):
             hidden units.
         """
         if isinstance(h, tensor.Variable):
-            return nnet.sigmoid(self.bias_vis + tensor.dot(h, self.weights.T))
+            return nnet.sigmoid(self.input_to_v_from_h(h))
         else:
             return [self.mean_v_given_h(hid) for hid in h]
 
@@ -638,6 +665,10 @@ class RBM(Block, Model):
         sigmoid_arg = self.input_to_h_from_v(v)
         return (-tensor.dot(v, self.bias_vis) -
                  nnet.softplus(sigmoid_arg).sum(axis=1))
+
+    def free_energy(self, V):
+        return self.free_energy_given_v(V)
+
 
     def free_energy_given_h(self, h):
         """
@@ -695,8 +726,9 @@ class RBM(Block, Model):
 
         Notes
         -----
-        The reconstruction used to assess error is deterministic, i.e.
-        no sampling is done, to reduce noise in the estimate.
+        The reconstruction used to assess error samples only the hidden
+        units. For the visible units, it uses the conditional mean.
+        No sampling of the visible units is done, to reduce noise in the estimate.
         """
         sample, _locals = self.gibbs_step_for_v(v, rng)
         return ((_locals['v_mean'] - v) ** 2).sum(axis=1).mean()
@@ -965,7 +997,8 @@ class mu_pooled_ssRBM(RBM):
         # sample h given v
         h_mean = self.mean_h_given_v(v)
         h_mean_shape = (batch_size, self.nhid)
-        h_sample = as_floatX(rng.uniform(size=h_mean_shape) < h_mean)
+        h_sample = rng.binomial(size=h_mean_shape,
+                n = 1, p = h_mean, dtype = h_mean.dtype)
 
         # sample s given (v,h)
         s_mu, s_var = self.mean_var_s_given_v_h1(v)

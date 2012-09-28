@@ -54,6 +54,8 @@ class DBM(Model):
                        monitor_params = False,
                        sampling_steps = 5,
                        num_classes = 0,
+                       init_beta = None,
+                       min_beta = None,
                        print_interval = 10000):
         """
             rbms: list of rbms to stack
@@ -73,6 +75,9 @@ class DBM(Model):
                         hidden layer. this layer is one-hot and driven by the labels
                         from the data
         """
+
+        self.init_beta = init_beta
+        self.min_beta = min_beta
 
         self.sampling_steps = sampling_steps
         self.monitor_params = monitor_params
@@ -134,6 +139,17 @@ class DBM(Model):
 
         self.redo_everything()
 
+
+    def get_weights(self):
+        x = raw_input('which weights?')
+        assert x in ['0','1']
+        if x == '0':
+            return self.W[0].get_value()
+        return np.dot(self.W[0].get_value(),self.W[1].get_value())
+
+    def get_input_space(self):
+        return self.rbms[0].get_input_space()
+
     def get_output_space(self):
         return VectorSpace(self.num_classes)
 
@@ -170,6 +186,9 @@ class DBM(Model):
             else:
                 self.Y_chains = None
 
+        if hasattr(self, 'init_beta') and self.init_beta is not None:
+            self.beta = sharedX( np.zeros( self.bias_vis.get_value().shape) + self.init_beta, name = 'beta')
+
 
     def make_chains(self, bias):
         """ make the shared variable representing a layer of
@@ -198,7 +217,7 @@ class DBM(Model):
     def set_monitoring_channel_prefix(self, prefix):
         self.monitoring_channel_prefix = prefix
 
-    def get_monitoring_channels(self, V):
+    def get_monitoring_channels(self, V, Y =  None):
 
         try:
             self.compile_mode()
@@ -443,6 +462,13 @@ class DBM(Model):
 
     def get_neg_phase_grads_from_samples(self, V_sample, H_samples, Y_sample = None):
 
+        if hasattr(self, 'V_chains'):
+            # theta must be updated using samples that were generated using gibbs sampling
+            # on theta
+            # if we use the shared variable itself, then these samples were generated using
+            # the *previous* value of theta
+            assert V_sample is not self.V_chains
+
         H_rao_blackwell, Y_rao_blackwell = self.rao_blackwellize(V_sample, H_samples, Y_sample)
 
         obj = self.expected_energy(V_hat = V_sample, H_hat = H_rao_blackwell, Y_hat = Y_rao_blackwell)
@@ -486,6 +512,9 @@ class DBM(Model):
 
         assert self.bias_hid[0] in rval
 
+        if hasattr(self,'beta'):
+            rval.append(self.beta)
+
         return rval
 
     def make_learn_func(self, V):
@@ -525,6 +554,13 @@ class DBM(Model):
 
         for rbm in self.rbms:
             rbm.censor_updates(updates)
+
+        if hasattr(self,'beta') and self.beta in updates:
+            #todo--censorship cache, etc.
+            min_beta = 1e-4
+            if hasattr(self,'min_beta') and self.min_beta is not None:
+                min_beta = self.min_beta
+            updates[self.beta] = T.clip(updates[self.beta],min_beta,1e6)
 
     def random_design_matrix(self, batch_size, theano_rng):
         raise NotImplementedError()
@@ -723,7 +759,7 @@ class DBM(Model):
         finally:
             self.deploy_mode()
 
-    def learn(self, dataset, batch_size):
+    def train_batch(self, dataset, batch_size):
         #TODO [for IG, not LY]: always uses exhaustive iteration, regardless of how the dataset is configured.
         #clean this up a bit
 
@@ -760,6 +796,7 @@ class DBM(Model):
                 X = self.iterator.next()
 
         self.learn_mini_batch(X,Y)
+        return True
 
     def learn_mini_batch(self, X):
         raise NotImplementedError("Not yet supported-- current project does not require DBM to learn on its own")
@@ -957,7 +994,7 @@ class InferenceProcedure:
 
         return mat
 
-def load_matlab_dbm(path):
+def load_matlab_dbm(path, num_chains = 1):
     """ Loads a two layer DBM stored in the format used by Ruslan Salakhutdinov's
     matlab demo"""
 
@@ -997,7 +1034,7 @@ def load_matlab_dbm(path):
     rbms = [ RBM( nvis = D, nhid = N1),
             RBM( nvis = N1, nhid = N2) ]
 
-    dbm = DBM(rbms, negative_chains = 1)
+    dbm = DBM(rbms, negative_chains = num_chains)
 
     dbm.bias_vis.set_value(visbiases)
     dbm.bias_hid[0].set_value(hidbiases)

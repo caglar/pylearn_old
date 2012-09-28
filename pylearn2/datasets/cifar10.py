@@ -1,11 +1,13 @@
 import os, cPickle, logging
 _logger = logging.getLogger('pylearn2.datasets.cifar10')
 
-import numpy as N
+import numpy as np
+N = np
 from pylearn2.datasets import dense_design_matrix
 
 class CIFAR10(dense_design_matrix.DenseDesignMatrix):
-    def __init__(self, which_set, center = False):
+    def __init__(self, which_set, center = False, rescale = False, gcn = None,
+            one_hot = False):
 
         # note: there is no such thing as the cifar10 validation set;
         # quit pretending that there is.
@@ -55,14 +57,105 @@ class CIFAR10(dense_design_matrix.DenseDesignMatrix):
         X = N.cast['float32'](Xs[which_set])
         y = Ys[which_set]
 
+        if isinstance(y,list):
+            y = np.asarray(y)
+
+        if which_set == 'test':
+            assert y.shape[0] == 10000
+
+        self.one_hot = one_hot
+        if one_hot:
+            one_hot = np.zeros((y.shape[0],10),dtype='float32')
+            for i in xrange(y.shape[0]):
+                one_hot[i,y[i]] = 1.
+            y = one_hot
+
         if center:
             X -= 127.5
+        self.center = center
+
+        if rescale:
+            X /= 127.5
+        self.rescale = rescale
+
+        self.gcn = gcn
+        if gcn is not None:
+            assert isinstance(gcn,float)
+            X = (X.T - X.mean(axis=1)).T
+            X = (X.T / np.sqrt(np.square(X).sum(axis=1))).T
+            X *= gcn
+
+        if which_set == 'test':
+            assert X.shape[0] == 10000
 
         view_converter = dense_design_matrix.DefaultViewConverter((32,32,3))
 
         super(CIFAR10,self).__init__(X = X, y = y, view_converter = view_converter)
 
         assert not N.any(N.isnan(self.X))
+
+    def adjust_for_viewer(self, X):
+        #assumes no preprocessing. need to make preprocessors mark the new ranges
+        rval = X.copy()
+
+        #patch old pkl files
+        if not hasattr(self,'center'):
+            self.center = False
+        if not hasattr(self,'rescale'):
+            self.rescale = False
+        if not hasattr(self,'gcn'):
+            self.gcn = False
+
+        if self.gcn is not None:
+            rval = X.copy()
+            for i in xrange(rval.shape[0]):
+                rval[i,:] /= np.abs(rval[i,:]).max()
+            return rval
+
+        if not self.center:
+            rval -= 127.5
+
+        if not self.rescale:
+            rval /= 127.5
+
+        rval = np.clip(rval,-1.,1.)
+
+        return rval
+
+    def adjust_to_be_viewed_with(self, X, orig, per_example = False):
+        # if the scale is set based on the data, display X oring the scale determined
+        # by orig
+        # assumes no preprocessing. need to make preprocessors mark the new ranges
+        rval = X.copy()
+
+        #patch old pkl files
+        if not hasattr(self,'center'):
+            self.center = False
+        if not hasattr(self,'rescale'):
+            self.rescale = False
+        if not hasattr(self,'gcn'):
+            self.gcn = False
+
+        if self.gcn is not None:
+            rval = X.copy()
+            if per_example:
+                for i in xrange(rval.shape[0]):
+                    rval[i,:] /= np.abs(orig[i,:]).max()
+            else:
+                rval /= np.abs(orig).max()
+            rval = np.clip(rval, -1., 1.)
+            return rval
+
+        if not self.center:
+            rval -= 127.5
+
+        if not self.rescale:
+            rval /= 127.5
+
+        rval = np.clip(rval,-1.,1.)
+
+        return rval
+
 
     @classmethod
     def _unpickle(cls, file):

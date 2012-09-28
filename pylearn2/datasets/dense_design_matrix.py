@@ -421,7 +421,10 @@ class DenseDesignMatrix(Dataset):
             examples. If unspecified, the entire dataset (`self.X`) is used
             instead.
 
-        TODO: why isn't this parameter named X?
+            This parameter is not named X because X is generally used to
+            refer to the design matrix for the current problem. In this
+            case we want to make it clear that `mat` need not be the design
+            matrix defining the dataset.
         """
         if self.view_converter is None:
             raise Exception("Tried to call get_topological_view on a dataset "
@@ -511,13 +514,17 @@ class DenseDesignMatrix(Dataset):
         return rx
 
     def get_batch_topo(self, batch_size, include_labels = False):
+
         if include_labels:
             batch_design, labels = self.get_batch_design(batch_size, True)
         else:
             batch_design = self.get_batch_design(batch_size)
+
         rval = self.view_converter.design_mat_to_topo_view(batch_design)
+
         if include_labels:
             return rval, labels
+
         return rval
 
     def view_shape(self):
@@ -589,14 +596,19 @@ class DefaultViewConverter(object):
 
 def from_dataset(dataset, num_examples):
     try:
-        V, y = dataset.get_batch_topo(num_examples,True)
+
+        V, y = dataset.get_batch_topo(num_examples, True)
+
     except:
+
         if isinstance(dataset, DenseDesignMatrix) and dataset.X is None and not control.get_load_data():
                 warnings.warn("from_dataset wasn't able to make subset of dataset, using the whole thing")
                 return DenseDesignMatrix(X = None, view_converter = dataset.view_converter)
                 #This patches a case where control.get_load_data() is false so dataset.X is None
                 #This logic should be removed whenever we implement lazy loading
         raise
-    rval =  DenseDesignMatrix(topo_view=V,y=y)
+
+    rval =  DenseDesignMatrix(topo_view=V, y=y)
     rval.adjust_for_viewer = dataset.adjust_for_viewer
+
     return rval

@@ -19,7 +19,15 @@ class NCE(UnsupervisedCost):
     def G(self, X, model):
         return model.log_prob(X) - self.noise.log_prob(X)
 
-    def __call__(self, model, X):
+    def __call__(self, model, X, Y = None):
+        #The Y here is the noise
+        #If you don't pass it in, it will be generated internally
+        #Passing it in lets you keep it constant while doing
+        #a learn search across several theano function calls
+        #and stuff like that
+        #This interface should probably be changed because it
+        #looks too much like the SupervisedCost interface
+
         if X.name is None:
             X_name = 'X'
         else:
@@ -29,7 +37,8 @@ class NCE(UnsupervisedCost):
         m_data = X.shape[0]
         m_noise = m_data * self.noise_per_clean
 
-        Y = self.noise.random_design_matrix(m_noise)
+        if Y is None:
+            Y = self.noise.random_design_matrix(m_noise)
 
         #Y = Print('Y',attrs=['min','max'])(Y)
 
@@ -86,7 +95,6 @@ class SM(UnsupervisedCost):
             dummy = score_i_batch.sum()
             full_grad = T.grad(dummy, fX)
             return full_grad[:,i]
-        #
 
         second_derivs, ignored = scan( f, sequences = T.arange(X.shape[1]), non_sequences = [X, score] )
         second_derivs = second_derivs.T
@@ -111,6 +119,7 @@ class SMD(UnsupervisedCost):
     """
 
     def __init__(self, corruptor):
+        super(SMD, self).__init__()
         self.corruptor = corruptor
 
     def __call__(self, model, X):

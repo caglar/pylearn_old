@@ -6,7 +6,7 @@ import warnings
 
 
 class Model(object):
-    def train(self, dataset):
+    def train_all(self, dataset):
         """
         If implemented, performs one epoch of training.
 
@@ -21,7 +21,24 @@ class Model(object):
         """
         raise NotImplementedError()
 
-    def get_monitoring_channels(self, V):
+    def train_batch(self, dataset, batch_size):
+        """
+        If implemented, performs an update on a single minibatch.
+
+        Parameters
+        ----------
+        dataset: pylearn2.datasets.dataset.Dataset 
+                The object to draw training data from.
+        batch_size: integer
+                Size of the minibatch to draw from dataset.
+
+        Return value:
+            True if the method should be called again for another update.
+            False if convergence has been reached.
+        """
+        raise NotImplementedError()
+
+    def get_monitoring_channels(self, V, Y = None):
         """
         Get monitoring channels for this model.
 
@@ -32,6 +49,8 @@ class Model(object):
             first axis and features along the second. This is data on which
             the monitoring quantities will be calculated (e.g., a validation
             set).
+        Y : optional class labels. Usually I have been representing them as
+            a one-hot design matrix but we don't really have a standard yet.
 
         Returns
         -------
@@ -48,6 +67,9 @@ class Model(object):
         option for your model.
         """
         return {}
+
+    def set_batch_size(self, batch_size):
+        pass
 
     def score(self, V):
         """
@@ -76,6 +98,9 @@ class Model(object):
         why this is not possible.
         """
         return T.grad(-self.free_energy(V).sum(), V)
+
+    def get_lr_scalers(self):
+        return {}
 
     def censor_updates(self, updates):
         """

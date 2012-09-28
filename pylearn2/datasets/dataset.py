@@ -36,6 +36,8 @@ class Dataset(object):
             One of 'sequential', 'random_slice', or 'random_uniform',
             *or* a class that instantiates an iterator that returns
             slices or index sequences on every call to next().
+            see utils/iteration.py for documentation of the default
+            modes
         batch_size : int, optional
             The size of an individual batch. Unnecessary if `mode` is
             'sequential' and `num_batches` is specified.
@@ -128,9 +130,11 @@ class Dataset(object):
 
             for example, for MNIST X will lie in [0,1] and the return value
                 should be X*2-1
+
+            Default is to do nothing
         """
 
-        raise NotImplementedError()
+        return X
 
     def has_targets(self):
         """ Returns true if the dataset includes targets """
